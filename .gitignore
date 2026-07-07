@@ -1,0 +1,6 @@
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+job_search_results.csv
+user_jd_*.csv
