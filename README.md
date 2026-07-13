@@ -1,8 +1,8 @@
 # JD Job Finder
 
-Search the web for job postings that match your job descriptions (JDs), then export **company names** and **job links** to a CSV.
+Search job boards for postings that match your job descriptions (JDs), then export **company names**, **job links**, and **match scores** to a CSV.
 
-Supports batch input from CSV or text files. Results are pulled from job boards and company career pages such as LinkedIn, Indeed, Greenhouse, Lever, Naukri, Shine, and Wellfound.
+Powered by [JobSpy](https://github.com/speedyapply/JobSpy) — scrapes LinkedIn, Indeed, Google Jobs, Naukri, Glassdoor, and more.
 
 ## Requirements
 
@@ -68,15 +68,28 @@ This writes results to `job_search_results.csv` by default.
 ```bash
 python jd_job_finder.py your_jobs.csv \
   -o results.csv \
-  --max-results 5 \
-  --delay 1.5
+  --max-results 10 \
+  --sites linkedin indeed naukri google \
+  --location "Bangalore" \
+  --country India \
+  --fetch-descriptions \
+  --delay 2
 ```
 
 | Flag | Description | Default |
 |------|-------------|---------|
 | `-o`, `--output` | Output CSV path | `job_search_results.csv` |
-| `--max-results` | Max job links per JD | `5` |
-| `--delay` | Seconds between searches | `1.5` |
+| `--max-results` | Max jobs per JD | `10` |
+| `--sites` | Job boards to search | `linkedin indeed google naukri` |
+| `--location` | Location filter | none |
+| `--country` | Country for Indeed/Glassdoor | `India` |
+| `--remote` | Only remote jobs | off |
+| `--fetch-descriptions` | Fetch full LinkedIn descriptions (slower) | off |
+| `--delay` | Seconds between JD searches | `2.0` |
+
+### Supported job boards
+
+`linkedin`, `indeed`, `google`, `naukri`, `glassdoor`, `zip_recruiter`, `bayt`, `bdjobs`
 
 ## Output
 
@@ -88,38 +101,41 @@ The CSV includes:
 | `job_description` | Original job description |
 | `company_name` | Company that posted the job |
 | `job_link` | Direct link to the posting |
-| `source` | Job board or careers site (e.g. LinkedIn, Indeed) |
-| `result_title` | Title from the search result |
-| `search_engine` | Search backend used |
+| `source` | Job board (LinkedIn, Indeed, Naukri, etc.) |
+| `result_title` | Job title from the listing |
+| `location` | Job location |
+| `is_remote` | Whether the job is remote |
+| `match_score` | Keyword overlap score (0–100) vs your JD |
+| `search_term` | Query extracted from your JD |
 
-## Optional: Google search via SerpAPI
-
-By default, the tool uses web search (DuckDuckGo-backed via the `ddgs` package). For Google results, set a [SerpAPI](https://serpapi.com/) key:
-
-```bash
-export SERPAPI_KEY="your_api_key_here"
-python jd_job_finder.py your_jobs.csv -o results.csv
-```
+Results are sorted by `match_score` (highest first) within each JD.
 
 ## Example
 
 ```bash
 source .venv/bin/activate
-python jd_job_finder.py sample_input.csv -o results.csv --max-results 5
+python jd_job_finder.py sample_input.csv -o results.csv --max-results 5 --sites linkedin indeed
 ```
 
 Sample output:
 
 ```csv
-input_id,job_description,company_name,job_link,source,result_title,search_engine
-1,"Senior Python Developer...",Gloify,https://in.linkedin.com/jobs/view/...,LinkedIn,Gloify hiring Senior Python Django Developer...,web_search
+input_id,job_description,company_name,job_link,source,result_title,location,is_remote,match_score,search_term
+1,"Senior Python Developer...",Gloify,https://in.linkedin.com/jobs/view/...,LinkedIn,Senior Python Django Developer,Bengaluru,False,42.5,Senior Python Developer Python Django REST AWS
 ```
+
+## How it works
+
+1. Extracts a **search query** from each JD (role title + key tech skills)
+2. Searches multiple job boards via **JobSpy**
+3. Scores each result by **keyword overlap** with your JD
+4. Exports structured results to CSV
 
 ## Notes
 
-- Results are **similar matches**, not guaranteed exact duplicates of your JD.
-- Listing/search pages are filtered out when possible; direct job posting links are preferred.
-- Use a small `--delay` between batch runs to reduce rate limiting from search providers.
+- Results are **similar matches** based on extracted keywords, not exact JD duplicates.
+- LinkedIn may rate-limit requests; use `--delay` and `--fetch-descriptions` only when needed.
+- For better match scores, pass `--fetch-descriptions` to pull full LinkedIn job text.
 
 ## License
 

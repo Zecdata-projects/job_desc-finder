@@ -1,44 +1,16 @@
 #!/usr/bin/env python3
-"""Find job posting links and company names from batch job descriptions."""
+"""Find job posting links and company names from batch job descriptions using JobSpy."""
 
 from __future__ import annotations
 
 import argparse
 import csv
-import os
 import re
 import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
-from urllib.parse import urlparse
-
-JOB_POSTING_RULES: list[tuple[re.Pattern[str], str]] = [
-    (re.compile(r"linkedin\.com/jobs/view/", re.I), "LinkedIn"),
-    (re.compile(r"indeed\.com/(viewjob|rc/clk|pagead|job/)", re.I), "Indeed"),
-    (re.compile(r"glassdoor\.[^/]+/job-listing/", re.I), "Glassdoor"),
-    (re.compile(r"boards\.greenhouse\.io/.+/jobs/\d+", re.I), "Greenhouse"),
-    (re.compile(r"jobs\.lever\.co/[^/]+/[a-f0-9-]{10,}", re.I), "Lever"),
-    (re.compile(r"myworkdayjobs\.com/.+/job/", re.I), "Workday"),
-    (re.compile(r"naukri\.com/job-listings-", re.I), "Naukri"),
-    (re.compile(r"shine\.com/jobs/", re.I), "Shine"),
-    (re.compile(r"instahyre\.com/j/", re.I), "Instahyre"),
-    (re.compile(r"wellfound\.com/jobs/", re.I), "Wellfound"),
-    (re.compile(r"smartrecruiters\.com/.+/[^/]+$", re.I), "SmartRecruiters"),
-    (re.compile(r"ashbyhq\.com/.+/application", re.I), "Ashby"),
-    (re.compile(r"/careers?/.+/job/", re.I), "Company Careers"),
-    (re.compile(r"/en/job/[A-Z0-9-]+/", re.I), "Company Careers"),
-]
-
-LISTING_PAGE_RULES: list[re.Pattern[str]] = [
-    re.compile(r"indeed\.com/q-", re.I),
-    re.compile(r"glassdoor\.[^/]+/Job/.+-jobs-", re.I),
-    re.compile(r"ziprecruiter\.com/Jobs/", re.I),
-    re.compile(r"linkedin\.com/jobs/search", re.I),
-    re.compile(r"/jobs/[a-z-]+/?$", re.I),
-    re.compile(r"bebee\.com/.+/jobs/", re.I),
-]
 
 JD_COLUMN_CANDIDATES = (
     "job_description",
@@ -47,6 +19,18 @@ JD_COLUMN_CANDIDATES = (
     "job_desc",
     "text",
 )
+
+DEFAULT_SITES = ("linkedin", "indeed", "google", "naukri")
+
+STOPWORDS = {
+    "a", "an", "and", "are", "as", "at", "be", "by", "for", "from", "in", "is",
+    "it", "of", "on", "or", "that", "the", "to", "with", "will", "you", "your",
+    "we", "our", "this", "have", "has", "had", "can", "should", "must", "may",
+    "such", "than", "their", "them", "they", "who", "which", "when", "where",
+    "years", "year", "experience", "hand", "hands", "on", "role", "work", "job",
+    "using", "use", "used", "including", "including", "other", "similar", "like",
+    "demonstrate", "ability", "skills", "strong", "focus", "including",
+}
 
 
 @dataclass
@@ -57,15 +41,10 @@ class JobRecord:
     job_link: str
     source: str
     result_title: str
-    search_engine: str
-
-
-@dataclass
-class SearchHit:
-    title: str
-    url: str
-    snippet: str
-    source: str
+    location: str
+    is_remote: str
+    match_score: str
+    search_term: str
 
 
 def read_job_descriptions(path: Path) -> list[tuple[str, str]]:
@@ -126,175 +105,159 @@ def _read_text_blocks(path: Path) -> list[tuple[str, str]]:
     return [(str(index), block) for index, block in enumerate(blocks, start=1)]
 
 
-def build_search_queries(job_description: str) -> list[str]:
+def extract_search_term(job_description: str) -> str:
+    """Build a keyword search query from a full job description."""
     cleaned = " ".join(job_description.split())
-    role_hint = _extract_role_hint(cleaned)
-    return [
-        f"{role_hint} hiring job opening",
-        f"{role_hint} site:linkedin.com/jobs/view",
-        f"{role_hint} site:indeed.com/viewjob OR site:greenhouse.io OR site:jobs.lever.co",
-    ]
+
+    role_match = re.search(
+        r"(?:^|\n)\s*(?:title\s*[:\-]\s*)?"
+        r"([A-Z][A-Za-z0-9 /\-]+(?:Engineer|Developer|Analyst|Architect|Manager|Scientist|Lead|Consultant))",
+        cleaned,
+        re.I,
+    )
+    if role_match:
+        role = role_match.group(1).strip()
+    else:
+        first_sentence = re.split(r"[.!?\n]", cleaned, maxsplit=1)[0].strip()
+        words = first_sentence.split()
+        role = " ".join(words[:10]) if len(words) > 10 else first_sentence
+
+    tech_terms = re.findall(
+        r"\b(?:Python|Java|JavaScript|TypeScript|React|Node\.?js|Django|Flask|FastAPI|"
+        r"TensorFlow|PyTorch|AWS|Azure|GCP|Docker|Kubernetes|SQL|PostgreSQL|MongoDB|"
+        r"Machine Learning|ML|AI|LLM|GenAI|Databricks|Spark|Tableau|Power BI|"
+        r"REST|API|DevOps|CI/CD|Snowflake|Fabric)\b",
+        cleaned,
+        re.I,
+    )
+    unique_terms: list[str] = []
+    seen: set[str] = set()
+    for term in tech_terms:
+        key = term.lower()
+        if key not in seen:
+            seen.add(key)
+            unique_terms.append(term)
+
+    if unique_terms:
+        return f"{role} {' '.join(unique_terms[:4])}".strip()
+    return role[:120].strip()
 
 
-def _extract_role_hint(text: str) -> str:
-    first_sentence = re.split(r"[.!?\n]", text, maxsplit=1)[0].strip()
-    words = first_sentence.split()
-    if len(words) > 12:
-        return " ".join(words[:12])
-    if len(text) <= 140:
-        return text
-    return " ".join(text.split()[:18])
+def tokenize(text: str) -> set[str]:
+    words = set(re.findall(r"[a-z0-9+#.]+", text.lower()))
+    return {word for word in words if len(word) > 2 and word not in STOPWORDS}
 
 
-def is_listing_page(url: str) -> bool:
-    return any(pattern.search(url) for pattern in LISTING_PAGE_RULES)
+def compute_match_score(job_description: str, title: str, description: str) -> float:
+    jd_tokens = tokenize(job_description)
+    if not jd_tokens:
+        return 0.0
+    result_tokens = tokenize(f"{title} {description}")
+    overlap = len(jd_tokens & result_tokens)
+    return round(overlap / len(jd_tokens) * 100, 1)
 
 
-def classify_source(url: str) -> str | None:
-    if is_listing_page(url):
+def format_site_name(site: str) -> str:
+    mapping = {
+        "linkedin": "LinkedIn",
+        "indeed": "Indeed",
+        "google": "Google Jobs",
+        "naukri": "Naukri",
+        "glassdoor": "Glassdoor",
+        "zip_recruiter": "ZipRecruiter",
+        "bayt": "Bayt",
+        "bdjobs": "BDJobs",
+    }
+    return mapping.get(site.lower(), site.title())
+
+
+def scrape_with_jobspy(
+    search_term: str,
+    max_results: int,
+    sites: list[str],
+    location: str | None,
+    country: str | None,
+    fetch_descriptions: bool,
+    is_remote: bool | None,
+) -> list[dict]:
+    from jobspy import scrape_jobs
+
+    kwargs: dict = {
+        "site_name": sites,
+        "search_term": search_term,
+        "results_wanted": max_results,
+        "verbose": 0,
+        "linkedin_fetch_description": fetch_descriptions,
+    }
+    if location:
+        kwargs["location"] = location
+    if country:
+        kwargs["country_indeed"] = country
+    if is_remote is not None:
+        kwargs["is_remote"] = is_remote
+
+    if "google" in sites:
+        google_query = search_term
+        if location:
+            google_query = f"{search_term} jobs near {location}"
+        kwargs["google_search_term"] = google_query
+
+    jobs_df = scrape_jobs(**kwargs)
+    if jobs_df is None or jobs_df.empty:
+        return []
+
+    records: list[dict] = []
+    for row in jobs_df.to_dict("records"):
+        job_url = _clean_value(row.get("job_url_direct")) or _clean_value(row.get("job_url")) or ""
+        company = _clean_value(row.get("company")) or "Unknown"
+        records.append(
+            {
+                "title": _clean_value(row.get("title")) or "",
+                "company": company,
+                "job_url": job_url,
+                "site": _clean_value(row.get("site")) or "",
+                "location": _clean_value(row.get("location")) or "",
+                "is_remote": row.get("is_remote"),
+                "description": _clean_value(row.get("description")) or "",
+            }
+        )
+    return [hit for hit in records if hit["job_url"]]
+
+
+def _clean_value(value: object) -> str | None:
+    if value is None:
         return None
-    for pattern, source in JOB_POSTING_RULES:
-        if pattern.search(url):
-            return source
-    return None
-
-
-def extract_company_name(title: str, url: str, snippet: str) -> str:
-    host = urlparse(url).netloc.lower()
-
-    if "linkedin.com" in host:
-        linkedin_match = re.match(r"^(.+?)\s+hiring\s+", title, re.I)
-        if linkedin_match:
-            return linkedin_match.group(1).strip()
-
-        slug_match = re.search(r"/jobs/view/[^/]+-at-([a-z0-9-]+)-\d+", url, re.I)
-        if slug_match:
-            return _slug_to_name(slug_match.group(1))
-
-    if "indeed.com" in host:
-        parts = [part.strip() for part in title.split(" - ") if part.strip()]
-        if len(parts) >= 2:
-            return parts[1]
-
-    lever_match = re.search(r"jobs\.lever\.co/([^/?#]+)", url, re.I)
-    if lever_match:
-        return _slug_to_name(lever_match.group(1))
-
-    greenhouse_match = re.search(r"boards\.greenhouse\.io/([^/?#]+)", url, re.I)
-    if greenhouse_match:
-        return _slug_to_name(greenhouse_match.group(1))
-
-    workday_match = re.search(r"([^.]+)\.wd\d+\.myworkdayjobs\.com", url, re.I)
-    if workday_match:
-        return _slug_to_name(workday_match.group(1))
-
-    for text in (snippet, title):
-        at_match = re.search(
-            r"\bat\s+([A-Z0-9][A-Za-z0-9&.\- ]{1,60}?)(?:\s*[|,.\-]|\s+(?:in|for|is|with)\b)",
-            text,
-        )
-        if at_match:
-            return at_match.group(1).strip()
-
-    domain = host.removeprefix("www.")
-    if domain.endswith(".linkedin.com") or domain == "linkedin.com":
-        return "Unknown"
-
-    if domain and domain not in {"indeed.com", "glassdoor.com"}:
-        company_part = domain.split(".")[0]
-        if company_part not in {"jobs", "careers", "apply"}:
-            return _slug_to_name(company_part)
-
-    return "Unknown"
-
-
-def _slug_to_name(value: str) -> str:
-    return value.replace("-", " ").replace("_", " ").strip().title()
-
-
-def search_with_serpapi(query: str, max_results: int) -> tuple[list[SearchHit], str]:
-    api_key = os.getenv("SERPAPI_KEY")
-    if not api_key:
-        return [], "serpapi"
-
-    try:
-        from serpapi import GoogleSearch
-    except ImportError:
-        return [], "serpapi"
-
-    payload = GoogleSearch({"q": query, "api_key": api_key, "num": max_results}).get_dict()
-    hits: list[SearchHit] = []
-
-    for item in payload.get("organic_results", [])[:max_results]:
-        url = item.get("link") or ""
-        if not url:
-            continue
-        source = classify_source(url)
-        if not source:
-            continue
-        hits.append(
-            SearchHit(
-                title=item.get("title") or "",
-                url=url,
-                snippet=item.get("snippet") or "",
-                source=source,
-            )
-        )
-
-    return hits, "google_via_serpapi"
-
-
-def search_with_ddgs(queries: list[str], max_results: int) -> tuple[list[SearchHit], str]:
-    try:
-        from ddgs import DDGS
-    except ImportError as exc:
-        raise RuntimeError("Install dependencies with: pip install -r requirements.txt") from exc
-
-    hits: list[SearchHit] = []
-    seen_urls: set[str] = set()
-
-    with DDGS() as ddgs:
-        for query in queries:
-            for item in ddgs.text(query, max_results=max(max_results * 4, 12)):
-                url = item.get("href") or item.get("url") or ""
-                if not url or url in seen_urls:
-                    continue
-
-                source = classify_source(url)
-                if not source:
-                    continue
-
-                seen_urls.add(url)
-                hits.append(
-                    SearchHit(
-                        title=item.get("title") or "",
-                        url=url,
-                        snippet=item.get("body") or "",
-                        source=source,
-                    )
-                )
-                if len(hits) >= max_results:
-                    return hits, "web_search"
-
-    return hits, "web_search"
-
-
-def search_job_postings(queries: list[str], max_results: int) -> tuple[list[SearchHit], str]:
-    if os.getenv("SERPAPI_KEY"):
-        hits, engine = search_with_serpapi(queries[0], max_results)
-        if hits:
-            return hits, engine
-
-    return search_with_ddgs(queries, max_results)
+    text = str(value).strip()
+    if not text or text.lower() == "nan":
+        return None
+    return text
 
 
 def find_jobs_for_description(
     input_id: str,
     job_description: str,
     max_results: int,
+    sites: list[str],
+    location: str | None,
+    country: str | None,
+    fetch_descriptions: bool,
+    is_remote: bool | None,
 ) -> list[JobRecord]:
-    queries = build_search_queries(job_description)
-    hits, engine = search_job_postings(queries, max_results)
+    search_term = extract_search_term(job_description)
+
+    try:
+        hits = scrape_with_jobspy(
+            search_term=search_term,
+            max_results=max_results,
+            sites=sites,
+            location=location,
+            country=country,
+            fetch_descriptions=fetch_descriptions,
+            is_remote=is_remote,
+        )
+    except Exception as exc:
+        print(f"  JobSpy error: {exc}", file=sys.stderr)
+        hits = []
 
     if not hits:
         return [
@@ -305,23 +268,32 @@ def find_jobs_for_description(
                 job_link="",
                 source="",
                 result_title="",
-                search_engine=engine,
+                location="",
+                is_remote="",
+                match_score="",
+                search_term=search_term,
             )
         ]
 
     records: list[JobRecord] = []
     for hit in hits:
+        score = compute_match_score(job_description, hit["title"], hit["description"])
         records.append(
             JobRecord(
                 input_id=input_id,
                 job_description=job_description,
-                company_name=extract_company_name(hit.title, hit.url, hit.snippet),
-                job_link=hit.url,
-                source=hit.source,
-                result_title=hit.title,
-                search_engine=engine,
+                company_name=hit["company"],
+                job_link=hit["job_url"],
+                source=format_site_name(hit["site"]),
+                result_title=hit["title"],
+                location=hit["location"],
+                is_remote=str(hit["is_remote"]) if hit["is_remote"] is not None else "",
+                match_score=str(score),
+                search_term=search_term,
             )
         )
+
+    records.sort(key=lambda record: float(record.match_score or 0), reverse=True)
     return records
 
 
@@ -333,7 +305,10 @@ def write_results(path: Path, records: Iterable[JobRecord]) -> None:
         "job_link",
         "source",
         "result_title",
-        "search_engine",
+        "location",
+        "is_remote",
+        "match_score",
+        "search_term",
     ]
     with path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
@@ -347,14 +322,17 @@ def write_results(path: Path, records: Iterable[JobRecord]) -> None:
                     "job_link": record.job_link,
                     "source": record.source,
                     "result_title": record.result_title,
-                    "search_engine": record.search_engine,
+                    "location": record.location,
+                    "is_remote": record.is_remote,
+                    "match_score": record.match_score,
+                    "search_term": record.search_term,
                 }
             )
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Search the web for job postings that match batch job descriptions."
+        description="Search job boards for postings that match batch job descriptions (via JobSpy)."
     )
     parser.add_argument(
         "input_file",
@@ -371,14 +349,41 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument(
         "--max-results",
         type=int,
-        default=5,
-        help="Maximum job links to save per job description (default: 5)",
+        default=10,
+        help="Maximum job links to save per job description (default: 10)",
+    )
+    parser.add_argument(
+        "--sites",
+        nargs="+",
+        default=list(DEFAULT_SITES),
+        choices=["linkedin", "indeed", "google", "naukri", "glassdoor", "zip_recruiter", "bayt", "bdjobs"],
+        help="Job boards to search (default: linkedin indeed google naukri)",
+    )
+    parser.add_argument(
+        "--location",
+        default="",
+        help="Location filter, e.g. 'Bangalore' or 'Remote'",
+    )
+    parser.add_argument(
+        "--country",
+        default="India",
+        help="Country for Indeed/Glassdoor filter (default: India)",
+    )
+    parser.add_argument(
+        "--remote",
+        action="store_true",
+        help="Only return remote jobs",
+    )
+    parser.add_argument(
+        "--fetch-descriptions",
+        action="store_true",
+        help="Fetch full LinkedIn descriptions (slower, better match scores)",
     )
     parser.add_argument(
         "--delay",
         type=float,
-        default=1.5,
-        help="Seconds to wait between searches (default: 1.5)",
+        default=2.0,
+        help="Seconds to wait between job descriptions (default: 2.0)",
     )
     return parser.parse_args(argv)
 
@@ -396,16 +401,34 @@ def main(argv: list[str] | None = None) -> int:
         print(str(exc), file=sys.stderr)
         return 1
 
+    location = args.location.strip() or None
+    country = args.country.strip() or None
+    is_remote = True if args.remote else None
+
     all_records: list[JobRecord] = []
     total = len(descriptions)
 
+    print(f"Searching sites: {', '.join(args.sites)}")
+
     for index, (input_id, job_description) in enumerate(descriptions, start=1):
-        print(f"[{index}/{total}] Searching jobs for input_id={input_id}...")
-        records = find_jobs_for_description(input_id, job_description, args.max_results)
+        search_term = extract_search_term(job_description)
+        print(f"[{index}/{total}] Searching for input_id={input_id}...")
+        print(f"  Query: {search_term}")
+
+        records = find_jobs_for_description(
+            input_id=input_id,
+            job_description=job_description,
+            max_results=args.max_results,
+            sites=args.sites,
+            location=location,
+            country=country,
+            fetch_descriptions=args.fetch_descriptions,
+            is_remote=is_remote,
+        )
         all_records.extend(records)
 
         found = sum(1 for record in records if record.job_link)
-        print(f"  Found {found} job link(s) using {records[0].search_engine}")
+        print(f"  Found {found} job(s)")
 
         if index < total and args.delay > 0:
             time.sleep(args.delay)
