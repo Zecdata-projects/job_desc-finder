@@ -14,8 +14,8 @@ Powered by [JobSpy](https://github.com/speedyapply/JobSpy) — scrapes LinkedIn,
 1. Clone the repository:
 
 ```bash
-git clone https://github.com/rahuls-zec/jd-job-finder.git
-cd jd-job-finder
+git clone https://github.com/Zecdata-projects/job_desc-finder.git
+cd job_desc-finder
 ```
 
 2. Create and activate a virtual environment:
